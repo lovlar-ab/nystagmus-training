@@ -54,7 +54,7 @@ func main() {
 		showAlert(loginFailedMessage, err.Error())
 	}
 	app.lastTick = time.Now()
-	startTimer(training.Tick.Seconds(), "tick:")
+	startTimer(training.Tick.Seconds(), "tick:", true)
 	app.ns.Send(sel("run"))
 }
 

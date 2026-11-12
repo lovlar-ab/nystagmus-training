@@ -17,14 +17,14 @@ const (
 	// Above menu bar and fullscreen apps.
 	screenSaverLevel = 1000
 	allSpaces        = uint(1<<0 | 1<<8)
-	hint             = "Follow the dot, head still. Esc stops. ↑↓ sets backdrop."
+	// Path samples per second; Core Animation interpolates.
+	sampleRate = 30
+	pathKey    = "path"
+	hint       = "Follow the dot, head still. Esc stops. ↑↓ sets backdrop."
 )
 
 type overlay struct {
 	window, dot, label, timer objc.ID
-	path                      training.Path
-	centerX, centerY          float64
-	started                   time.Time
 	running                   bool
 }
 
@@ -38,8 +38,14 @@ func buildOverlay(frame NSRect) {
 	o.window.Send(sel("setCollectionBehavior:"), allSpaces)
 	content := o.window.Send(sel("contentView"))
 
+	// A bare layer animates off-process.
 	size := float64(training.DotSize)
-	o.dot = layerView(content, rect(0, 0, size, size), cls("NSColor").Send(sel("systemGreenColor")), size/2)
+	content.Send(sel("setWantsLayer:"), true)
+	o.dot = cls("CALayer").Send(sel("layer"))
+	o.dot.Send(sel("setBounds:"), rect(0, 0, size, size))
+	o.dot.Send(sel("setCornerRadius:"), size/2)
+	o.dot.Send(sel("setBackgroundColor:"), cls("NSColor").Send(sel("systemGreenColor")).Send(sel("CGColor")))
+	content.Send(sel("layer")).Send(sel("addSublayer:"), o.dot)
 
 	o.label = cls("NSTextField").Send(sel("labelWithString:"), nsString(hint))
 	o.label.Send(sel("setTextColor:"), gray(0.55, 1))
@@ -79,20 +85,19 @@ func startSession() {
 	applyBackdrop()
 	o.window.Send(sel("setFrame:display:"), frame, true)
 	width, height := frame.Size.Width, frame.Size.Height
-	o.started = time.Now()
-	// The start time seeds each path.
-	seed := uint64(o.started.UnixNano())
-	o.path = training.NewPath(width, height, screenWidthCM(screen), seed)
-	o.centerX, o.centerY = width/2, height/2
 	labelWidth := objc.Send[NSRect](o.label, sel("frame")).Size.Width
 	o.label.Send(sel("setFrameOrigin:"), NSPoint{X: (width - labelWidth) / 2, Y: 24})
-	moveDot(0)
+	// The start time seeds each path.
+	path := training.NewPath(width, height, screenWidthCM(screen), uint64(time.Now().UnixNano()))
+	length := app.settings.Length().Seconds()
 
 	o.running = true
 	app.ns.Send(sel("activateIgnoringOtherApps:"), true)
 	o.window.Send(sel("makeKeyAndOrderFront:"), nilID)
+	// Animate once the window is on screen.
+	animateDot(path, width/2, height/2, length)
 	cls("NSCursor").Send(sel("hide"))
-	o.timer = startTimer(1.0/60, "frame:")
+	o.timer = startTimer(length, "finish:", false)
 	refreshMenu()
 }
 
@@ -102,8 +107,10 @@ func stopSession() {
 		return
 	}
 	o.running = false
+	// A firing timer lives through its callback.
 	o.timer.Send(sel("invalidate"))
 	o.timer = 0
+	o.dot.Send(sel("removeAnimationForKey:"), nsString(pathKey))
 	o.window.Send(sel("orderOut:"), nilID)
 	cls("NSCursor").Send(sel("unhide"))
 	// Hiding returns focus to the last app.
@@ -112,25 +119,28 @@ func stopSession() {
 	refreshMenu()
 }
 
-func moveDot(seconds float64) {
-	o := &app.overlay
-	x, y := o.path.At(seconds)
-	radius := float64(training.DotSize) / 2
-	o.dot.Send(sel("setFrameOrigin:"), NSPoint{X: o.centerX + x - radius, Y: o.centerY + y - radius})
+// animateDot hands the whole path to Core Animation.
+func animateDot(path training.Path, centerX, centerY, seconds float64) {
+	count := int(seconds*sampleRate) + 1
+	points := make([]NSPoint, count)
+	for i := range points {
+		x, y := path.At(float64(i) / sampleRate)
+		points[i] = NSPoint{X: centerX + x, Y: centerY + y}
+	}
+	// Even time steps match even keyframes.
+	line := pathCreate()
+	pathAddLines(line, 0, &points[0], uint(count))
+	animation := cls("CAKeyframeAnimation").Send(sel("animationWithKeyPath:"), nsString("position"))
+	animation.Send(sel("setPath:"), line)
+	animation.Send(sel("setDuration:"), seconds)
+	pathRelease(line)
+
+	dot := app.overlay.dot
+	dot.Send(sel("setPosition:"), points[0])
+	dot.Send(sel("addAnimation:forKey:"), animation, nsString(pathKey))
 }
 
-func onFrame(_ objc.ID, _ objc.SEL, _ objc.ID) {
-	o := &app.overlay
-	if !o.running {
-		return
-	}
-	elapsed := time.Since(o.started)
-	if elapsed >= app.settings.Length() {
-		stopSession()
-		return
-	}
-	moveDot(elapsed.Seconds())
-}
+func onFinish(_ objc.ID, _ objc.SEL, _ objc.ID) { stopSession() }
 
 // onKey swallows all other keys.
 func onKey(_ objc.ID, _ objc.SEL, event objc.ID) {

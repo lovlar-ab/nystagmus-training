@@ -37,6 +37,10 @@ var (
 	idleSeconds func(state int32, event uint32) float64
 	// Physical display size, millimeters.
 	displaySize func(display uint32) NSSize
+	// CGPath; the transform is always NULL.
+	pathCreate   func() uintptr
+	pathAddLines func(path, transform uintptr, points *NSPoint, count uint)
+	pathRelease  func(path uintptr)
 )
 
 func loadFrameworks() {
@@ -50,6 +54,9 @@ func loadFrameworks() {
 	}
 	purego.RegisterLibFunc(&idleSeconds, graphics, "CGEventSourceSecondsSinceLastEventType")
 	purego.RegisterLibFunc(&displaySize, graphics, "CGDisplayScreenSize")
+	purego.RegisterLibFunc(&pathCreate, graphics, "CGPathCreateMutable")
+	purego.RegisterLibFunc(&pathAddLines, graphics, "CGPathAddLines")
+	purego.RegisterLibFunc(&pathRelease, graphics, "CGPathRelease")
 }
 
 func sel(name string) objc.SEL { return objc.RegisterName(name) }
@@ -60,10 +67,10 @@ func nsString(text string) objc.ID {
 	return cls("NSString").Send(sel("stringWithUTF8String:"), text)
 }
 
-func startTimer(seconds float64, action string) objc.ID {
+func startTimer(seconds float64, action string, repeats bool) objc.ID {
 	return cls("NSTimer").Send(
 		sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
-		seconds, app.controller, sel(action), nilID, true)
+		seconds, app.controller, sel(action), nilID, repeats)
 }
 
 func showAlert(message, detail string) {
@@ -78,7 +85,7 @@ func showAlert(message, detail string) {
 func registerClasses() {
 	_, err := objc.RegisterClass("NTController", objc.GetClass("NSObject"), nil, nil, []objc.MethodDef{
 		{Cmd: sel("tick:"), Fn: onTick},
-		{Cmd: sel("frame:"), Fn: onFrame},
+		{Cmd: sel("finish:"), Fn: onFinish},
 		{Cmd: sel("toggleSession:"), Fn: onSession},
 		{Cmd: sel("toggleLogin:"), Fn: onLogin},
 	})
